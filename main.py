@@ -10,11 +10,13 @@ events = []
 
 GITHUB_EVENT_URL = "https://api.github.com/repos/{}/events"
 
+
 def extract_repo(url: str) -> str:
     match = re.search(r"github\.com/([\w-]+/[\w.-]+)", url)
     if not match:
         raise HTTPException(status_code=400, detail="Invalid GitHub repo URL")
     return match.group(1)
+
 
 async def poll_repo_events(repo: str):
     seen_ids = set()
@@ -27,19 +29,46 @@ async def poll_repo_events(repo: str):
                     for e in data:
                         if e["id"] not in seen_ids:
                             seen_ids.add(e["id"])
+
+                            details = {}
+                            if e["type"] == "PushEvent":
+                                commits = e.get("payload", {}).get("commits", [])
+                                details = {
+                                    "branch": e["payload"].get("ref"),
+                                    "commit_count": len(commits),
+                                    "messages": [c["message"] for c in commits],
+                                }
+                            elif e["type"] == "IssuesEvent":
+                                issue = e.get("payload", {}).get("issue", {})
+                                details = {
+                                    "action": e["payload"].get("action"),
+                                    "title": issue.get("title"),
+                                    "url": issue.get("html_url"),
+                                }
+                            elif e["type"] == "PullRequestEvent":
+                                pr = e.get("payload", {}).get("pull_request", {})
+                                details = {
+                                    "action": e["payload"].get("action"),
+                                    "title": pr.get("title"),
+                                    "url": pr.get("html_url"),
+                                }
+
                             events.append({
                                 "repo": repo,
                                 "type": e["type"],
                                 "user": e["actor"]["login"],
+                                "details": details,
                                 "created_at": e["created_at"],
-                                "recorded_at": datetime.utcnow().isoformat()
+                                "recorded_at": datetime.utcnow().isoformat(),
                             })
         except Exception:
             pass
         await asyncio.sleep(30)
 
+
 class Repo(BaseModel):
     repo_url: str
+
 
 @app.post("/subscribe")
 async def subscribe_repo(repo: Repo, background_tasks: BackgroundTasks):
@@ -50,14 +79,17 @@ async def subscribe_repo(repo: Repo, background_tasks: BackgroundTasks):
     background_tasks.add_task(poll_repo_events, repo_name)
     return {"status": "subscribed", "repo": repo_name}
 
+
 @app.get("/inspect")
 def get_events():
     return {"count": len(events), "data": events[-20:]}
+
 
 @app.delete("/clear")
 def clear_events():
     events.clear()
     return {"status": "cleared"}
+
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -72,6 +104,7 @@ def home():
           input, button { padding: 6px 10px; margin-right: 4px; font-family: monospace; }
           input { width: 350px; }
           button { background: #0f0; color: #111; border: none; cursor: pointer; }
+          hr { margin: 20px 0; border: 1px solid #0f0; }
         </style>
       </head>
       <body>
@@ -99,9 +132,12 @@ def home():
           async function loadEvents() {
             const res = await fetch('/inspect');
             const data = await res.json();
-            const lines = data.data.map(e =>
-              `[${e.recorded_at}] ${e.repo} | ${e.type} by ${e.user}`
-            ).join('\\n');
+            const lines = data.data.map(e => {
+              let info = `[${e.recorded_at}] ${e.repo} | ${e.type} by ${e.user}`;
+              if (e.details && Object.keys(e.details).length)
+                info += "\\n   " + JSON.stringify(e.details, null, 2);
+              return info;
+            }).join('\\n\\n');
             document.getElementById('events').innerText = lines || "No events yet.";
           }
 
