@@ -9,6 +9,15 @@ pipeline {
     }
 
     stages {
+        stage('Pre-Docker Setup') {
+            steps {
+                sh '''
+                    mkdir -p ~/.docker
+                    echo '{"credsStore":""}' > ~/.docker/config.json
+                '''
+            }
+        }
+
         stage('Checkout') {
             steps {
                 git branch: 'main', url: 'https://github.com/R0h-a-a-n/Github-webhook.git'
