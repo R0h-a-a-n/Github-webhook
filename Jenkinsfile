@@ -9,7 +9,6 @@ pipeline {
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 git branch: 'main', url: 'https://github.com/R0h-a-a-n/Github-webhook.git'
@@ -18,9 +17,9 @@ pipeline {
 
         stage('Docker Login') {
             steps {
-                withCredentials([string(credentialsId: 'docker-pat', variable: 'DOCKER_PAT')]) {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub_cred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh '''
-                        echo $DOCKER_PAT | ${DOCKER_PATH} login -u spoofedbinary --password-stdin
+                        echo $DOCKER_PASS | ${DOCKER_PATH} login -u $DOCKER_USER --password-stdin
                     '''
                 }
             }
