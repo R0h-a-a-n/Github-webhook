@@ -3,12 +3,14 @@ pipeline {
 
     environment {
         DOCKER_PATH = '/opt/homebrew/bin/docker'
+        KUBECTL_PATH = '/opt/homebrew/bin/kubectl'
         DOCKER_IMAGE = 'spoofedbinary/github-monitor'
         BLUE_DEPLOY = 'github-monitor-blue'
         GREEN_DEPLOY = 'github-monitor-green'
     }
 
     stages {
+
         stage('Pre-Docker Setup') {
             steps {
                 sh '''
@@ -26,7 +28,7 @@ pipeline {
 
         stage('Docker Login') {
             steps {
-                withCredentials([usernamePassword(credentialsId: 'dockherhub_cred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub_cred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh '''
                         echo $DOCKER_PASS | ${DOCKER_PATH} login -u $DOCKER_USER --password-stdin
                     '''
@@ -54,8 +56,10 @@ pipeline {
             steps {
                 withCredentials([file(credentialsId: 'kubeconfig-cred', variable: 'KUBECONFIG')]) {
                     script {
+                        def KUBECTL = "${KUBECTL_PATH}"
+
                         def currentColor = sh(
-                            script: "kubectl get svc github-monitor-service -o=jsonpath='{.spec.selector.app}' || echo github-monitor-green",
+                            script: "${KUBECTL} get svc github-monitor-service -o=jsonpath='{.spec.selector.app}' || echo github-monitor-green",
                             returnStdout: true
                         ).trim()
 
@@ -63,11 +67,12 @@ pipeline {
                         echo "Deploying ${newColor}"
 
                         sh """
-                            kubectl set image deployment/github-monitor-${newColor} github-monitor=${DOCKER_IMAGE}:${BUILD_NUMBER} || \
-                            kubectl apply -f k8s/deployment-${newColor}.yaml
-                            kubectl rollout status deployment/github-monitor-${newColor}
-                            kubectl patch svc github-monitor-service -p '{"spec":{"selector":{"app":"github-monitor-${newColor}"}}}'
-                            kubectl delete deployment ${currentColor} || true
+                            export PATH=$PATH:/opt/homebrew/bin
+                            ${KUBECTL} set image deployment/github-monitor-${newColor} github-monitor=${DOCKER_IMAGE}:${BUILD_NUMBER} || \
+                            ${KUBECTL} apply -f k8s/deployment-${newColor}.yaml
+                            ${KUBECTL} rollout status deployment/github-monitor-${newColor}
+                            ${KUBECTL} patch svc github-monitor-service -p '{"spec":{"selector":{"app":"github-monitor-${newColor}"}}}'
+                            ${KUBECTL} delete deployment ${currentColor} || true
                         """
                     }
                 }
