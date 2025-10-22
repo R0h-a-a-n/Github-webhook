@@ -10,9 +10,7 @@ pipeline {
 
     stages {
         stage('Checkout') {
-            steps {
-                git 'https://github.com/R0h-a-a-n/github_webhook.git'
-            }
+            steps { git 'https://github.com/rohaans/github_webhook.git' }
         }
 
         stage('Build Docker Image') {
@@ -34,13 +32,13 @@ pipeline {
             }
         }
 
-        stage('Deploy to Kubernetes (Blue-Green)') {
+        stage('Deploy Blue-Green') {
             steps {
                 withCredentials([file(credentialsId: 'kubeconfig-cred', variable: 'KUBECONFIG')]) {
                     script {
                         def currentColor = sh(script: "kubectl get svc github-monitor-service -o=jsonpath='{.spec.selector.app}' || echo github-monitor-green", returnStdout: true).trim()
                         def newColor = currentColor.contains('blue') ? 'green' : 'blue'
-                        echo "Current live: ${currentColor}, deploying ${newColor}"
+                        echo "Current live: ${currentColor}, deploying: ${newColor}"
 
                         sh """
                         kubectl set image deployment/github-monitor-${newColor} github-monitor=${DOCKER_IMAGE}:${BUILD_NUMBER} || \
