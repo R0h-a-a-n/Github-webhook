@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: github-monitor
-          image: spoofedbinary/github-monitor:green
+          image: spoofedbinary/github-monitor
           ports:
             - containerPort: 8000
           env:
