@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-monitor-service
+spec:
+  selector:
+    app: github-monitor-blue  
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: LoadBalancer

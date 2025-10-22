@@ -4,37 +4,66 @@ import re
 import httpx
 import asyncio
 import logging
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from typing import Optional
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from datetime import datetime
 from contextlib import asynccontextmanager
+
+# --- Configuration & Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+# --- GitHub Configuration ---
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_EVENT_URL = "https://api.github.com/repos/{}/events"
-POLL_INTERVAL_SECONDS = 61
+POLL_INTERVAL_SECONDS = 10
+
+# --- Global State ---
 poll_state = {}
 events = []
 seen_event_ids = set()
 
-def extract_repo(url: str) -> str | None:
+# --- Utility Functions ---
+
+def extract_repo(url: str) -> Optional[str]:
+    """Extracts 'user/repo' from a GitHub URL."""
     match = re.search(r"github\.com/([\w-]+/[\w.-]+)", url)
     if not match:
         return None
     return match.group(1).rstrip('/')
 
 def process_event_payload(event: dict) -> dict:
+    """Extracts relevant details from a GitHub event payload."""
     details = {}
     e_type = event.get("type")
     payload = event.get("payload", {})
 
     if e_type == "PushEvent":
         commits = payload.get("commits", [])
-        details = {
-            "branch": payload.get("ref", "").split('/')[-1],
-            "commit_count": len(commits),
-            "messages": [c.get("message", "No message").split('\n')[0] for c in commits],
-        }
+        ref_full = payload.get("ref", "")
+        branch_or_tag = ref_full.split('/')[-1] if ref_full else "unknown"
+        
+        if "refs/tags/" in ref_full:
+            details = {
+                "action": "Pushed Tag",
+                "tag": branch_or_tag,
+                "commit_count": len(commits)
+            }
+        elif len(commits) > 0:
+            details = {
+                "action": "Pushed Commits",
+                "branch": branch_or_tag,
+                "commit_count": len(commits),
+                "messages": [c.get("message", "No message").split('\n')[0] for c in commits],
+            }
+        else:
+            details = {
+                "action": "Pushed (No Commits)",
+                "ref": ref_full,
+                "note": "This is often a force-push, branch deletion, or other ref update."
+            }
     elif e_type == "IssuesEvent":
         issue = payload.get("issue", {})
         details = {
@@ -57,12 +86,19 @@ def process_event_payload(event: dict) -> dict:
         details = {
             "ref_type": payload.get("ref_type"),
             "ref": payload.get("ref"),
+            "description": payload.get("description")
         }
     elif e_type == "DeleteEvent":
         details = {
             "ref_type": payload.get("ref_type"),
             "ref": payload.get("ref"),
         }
+    else:
+        action = payload.get("action")
+        if action:
+            details = {"action": action}
+        else:
+            details = {"unhandled_event": True, "payload_keys": list(payload.keys())}
 
     return {
         "repo": event.get("repo", {}).get("name"),
@@ -74,31 +110,57 @@ def process_event_payload(event: dict) -> dict:
         "recorded_at": datetime.utcnow().isoformat() + "Z",
     }
 
-async def poll_repo_events(repo: str, client: httpx.AsyncClient):
+# --- Core Polling Logic ---
 
-    headers = {"Accept": "application/vnd.github.v3+json"}
+async def poll_repo_events(repo: str, client: httpx.AsyncClient):
+    """
+    Polls a single repository for events using ETag for conditional requests.
+    Returns a list of new, processed events.
+    """
+    repo_state = poll_state.get(repo, {})
+    etag = repo_state.get("etag")
+
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {GITHUB_TOKEN}"
+    }
+    if etag:
+        headers["If-None-Match"] = etag
 
     try:
         url = GITHUB_EVENT_URL.format(repo)
         resp = await client.get(url, headers=headers, timeout=10)
-        poll_state[repo] = {"last_check": datetime.utcnow().isoformat()}
+        
+        repo_state["last_check"] = datetime.utcnow().isoformat()
+
+        if resp.status_code == 304:
+            logger.info(f"[{repo}] No changes (304).")
+            return []
+
         if resp.status_code == 200:
             logger.info(f"[{repo}] New events found (200).")
+            
+            repo_state["etag"] = resp.headers.get("etag")
+            
             new_events_data = resp.json()
             new_processed_events = []
-            for event_data in reversed(new_events_data): 
+
+            for event_data in reversed(new_events_data):
                 if event_data["id"] not in seen_event_ids:
                     seen_event_ids.add(event_data["id"])
                     processed = process_event_payload(event_data)
                     new_processed_events.append(processed)
             
             return new_processed_events
+
         elif resp.status_code == 404:
             logger.warning(f"[{repo}] Repository not found (404). Removing from polling.")
             if repo in poll_state:
                 del poll_state[repo]
+        elif resp.status_code == 401:
+             logger.error(f"[{repo}] Bad credentials (401). Check GITHUB_TOKEN.")
         elif resp.status_code == 403:
-            logger.error(f"[{repo}] Rate limit exceeded (403). Polling interval is {POLL_INTERVAL_SECONDS}s.")
+            logger.error(f"[{repo}] Rate limit exceeded (403) or token lacks 'repo' scope.")
         else:
             logger.error(f"[{repo}] Error fetching events: {resp.status_code}")
 
@@ -110,7 +172,15 @@ async def poll_repo_events(repo: str, client: httpx.AsyncClient):
     return []
 
 async def poller_manager():
-    global events  
+    """
+    A central background task that polls all subscribed repositories
+    concurrently at a set interval.
+    """
+    global events
+    if not GITHUB_TOKEN:
+        logger.error("GITHUB_TOKEN not set. Poller will not start.")
+        return
+
     async with httpx.AsyncClient() as client:
         while True:
             if not poll_state:
@@ -118,6 +188,7 @@ async def poller_manager():
                 continue
             
             logger.info(f"Polling {len(poll_state)} repositories...")
+            
             tasks = [poll_repo_events(repo, client) for repo in list(poll_state.keys())]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -125,7 +196,7 @@ async def poller_manager():
             for result in results:
                 if isinstance(result, Exception):
                     logger.error(f"Poller task failed: {result}")
-                elif result: 
+                elif result:
                     events.extend(result)
                     new_event_count += len(result)
 
@@ -134,6 +205,8 @@ async def poller_manager():
                 events = sorted(events, key=lambda x: x['recorded_at'], reverse=True)[:200]
 
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+# --- FastAPI App Setup ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -147,6 +220,8 @@ app = FastAPI(lifespan=lifespan)
 class Repo(BaseModel):
     repo_url: str
 
+# --- API Endpoints ---
+
 @app.post("/subscribe")
 async def subscribe_repo(repo: Repo):
     repo_name = extract_repo(repo.repo_url)
@@ -155,16 +230,19 @@ async def subscribe_repo(repo: Repo):
     
     if repo_name in poll_state:
         return {"status": "already_subscribed", "repo": repo_name}
-    poll_state[repo_name] = {"last_check": None}
+    
+    poll_state[repo_name] = {"etag": None, "last_check": None}
     logger.info(f"Subscribed to {repo_name}")
     return {"status": "subscribed", "repo": repo_name}
 
 @app.get("/inspect")
 def get_events():
+    """Returns the most recent events (up to 20)."""
     return {"count": len(events), "data": events[:20]}
 
 @app.delete("/clear")
 def clear_events():
+    """Clears all recorded events."""
     events.clear()
     seen_event_ids.clear()
     logger.info("Cleared all events.")
@@ -181,7 +259,7 @@ def home():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
           body { 
-            font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+            font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
             padding: 20px; 
             background: #111827; 
             color: #d1d5db; 
@@ -222,7 +300,7 @@ def home():
             color: #9ca3af;
             font-family: monospace;
             font-size: 0.9em;
-            display: none; /* Hidden by default */
+            display: none;
           }
           hr { margin: 24px 0; border: 1px solid #374151; }
           pre { 
@@ -276,7 +354,7 @@ def home():
                 throw new Error(data.detail || 'Subscription failed');
               }
               showStatus(`Subscribed to: ${data.repo}`);
-              repoInput.value = ''; // Clear input on success
+              repoInput.value = '';
             } catch (err) {
               showStatus(err.message, true);
             }
@@ -290,10 +368,6 @@ def home():
 
               const lines = data.data.map(e => {
                 let details = JSON.stringify(e.details, null, 2);
-                // Simple formatting for details
-                details = details.replace(/\{\\n/g, '{ \\n  ')
-                                 .replace(/\\n\}/g, '\\n}');
-                                 
                 return `[${e.recorded_at}] ${e.repo} | ${e.type} by ${e.user}\\n  Details: ${details}`;
               }).join('\\n\\n');
               
@@ -313,14 +387,21 @@ def home():
             }
           }
 
-          setInterval(loadEvents, 5000); // Refresh events every 5 seconds
-          loadEvents(); // Initial load
+          setInterval(loadEvents, 5000);
+          loadEvents();
         </script>
       </body>
     </html>
     """
 
 if __name__ == "__main__":
-    logger.info(f"Running without GITHUB_TOKEN. Poll interval set to {POLL_INTERVAL_SECONDS}s to avoid rate limits (60 req/hr).")
+    if not GITHUB_TOKEN:
+        logger.warning("="*50)
+        logger.warning("WARNING: GITHUB_TOKEN environment variable not set.")
+        logger.warning("Polling will fail with a 401 error.")
+        logger.warning("Please set the variable and restart.")
+        logger.warning("="*50)
+    else:
+        logger.info(f"Using GITHUB_TOKEN. Poll interval set to {POLL_INTERVAL_SECONDS}s.")
+    
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-

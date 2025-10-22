@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-monitor-green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: github-monitor-green
+  template:
+    metadata:
+      labels:
+        app: github-monitor-green
+    spec:
+      containers:
+        - name: github-monitor
+          image: spoofedbinary/github-monitor:green
+          ports:
+            - containerPort: 8000
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-secret
+                  key: token
