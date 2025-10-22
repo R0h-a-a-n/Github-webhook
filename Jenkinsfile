@@ -1,10 +1,10 @@
 pipeline {
     agent any
     environment {
-        DOCKER_PATH = sh(script: "which docker", returnStdout: true).trim()
-        DOCKER_IMAGE = "spoofedbinary/github-monitor"
-        BLUE_DEPLOY = "github-monitor-blue"
-        GREEN_DEPLOY = "github-monitor-green"
+        DOCKER_PATH = '/opt/homebrew/bin/docker'
+        DOCKER_IMAGE = 'spoofedbinary/github-monitor'
+        BLUE_DEPLOY = 'github-monitor-blue'
+        GREEN_DEPLOY = 'github-monitor-green'
         KUBE_CONFIG = credentials('kubeconfig-cred')
     }
 
